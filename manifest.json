@@ -1,8 +1,16 @@
 {
-  "name": "SearchSort",
-  "description": "Sort Discord mobile search results by newest first or oldest first, like on PC.",
-  "authors": [{ "name": "aquavvx" }],
+  "spec": 3,
+  "type": "plugin",
+  "id": "aquavvx.searchsort",
+  "version": "1.0.0",
+  "display": {
+    "name": "SearchSort",
+    "description": "Sort Discord mobile search results by newest first or oldest first, like on PC.",
+    "authors": [{ "name": "aquavvx" }]
+  },
   "main": "index.js",
-  "hash": "",
-  "vendetta": { "icon": "ic_search" }
+  "extras": {
+    "source": "https://github.com/aquavvx/SearchSort",
+    "bunny": {}
+  }
 }
