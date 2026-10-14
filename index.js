@@ -172,26 +172,6 @@ var plugin = (() => {
   const isEl = (x) => !!x && typeof x === "object" && !Array.isArray(x) && x.props && (x.type !== undefined || x.$$typeof !== undefined);
   const isPlain = (x) => !!x && typeof x === "object" && !Array.isArray(x) && !isEl(x);
   const isOurs = (x) => !!x && ((typeof x.key === "string" && x.key.startsWith("searchsort-")) || x.__searchsort === true);
-  const isSortLabel = (value) => typeof value === "string" && /^\s*(?:✔\s*)?Sort:\s(?:Newest first|Oldest first|Most relevant)\s*$/.test(value);
-
-  function containsOurs(node, depth = 0) {
-    if (node == null || depth > 8) return false;
-    if (isOurs(node)) return true;
-    if (Array.isArray(node)) return node.some((item) => containsOurs(item, depth + 1));
-    if (isEl(node)) {
-      return Object.values(node.props).some((value) => containsOurs(value, depth + 1));
-    }
-    return false;
-  }
-
-  function containsSortLabel(node, depth = 0) {
-    if (node == null || depth > 8) return false;
-    if (isSortLabel(node)) return true;
-    if (Array.isArray(node)) return node.some((item) => containsSortLabel(item, depth + 1));
-    if (isEl(node)) return Object.values(node.props).some((value) => containsSortLabel(value, depth + 1));
-    if (isPlain(node)) return Object.values(node).some((value) => containsSortLabel(value, depth + 1));
-    return false;
-  }
 
   function labelsIn(node, out = new Set(), depth = 0) {
     if (node == null || depth > 4) return out;
@@ -247,11 +227,10 @@ var plugin = (() => {
 
   function transformArray(arr, depth) {
     if (!Array.isArray(arr) || depth > 3 || arr.length > 30 || arr.length === 0) return null;
-    const clean = arr.filter((item) => !containsOurs(item) && !containsSortLabel(item));
-    const source = clean.length === arr.length ? arr : clean;
+    if (arr.some(isOurs)) return null;
 
     const candidates = [];
-    source.forEach((item, i) => {
+    arr.forEach((item, i) => {
       if (isEl(item)) {
         const set = labelsIn(item);
         if (set.size > 0) labelSightings++;
@@ -273,31 +252,28 @@ var plugin = (() => {
       return [...arr.slice(0, pick.i + 1), ...extras, ...arr.slice(pick.i + 1)];
     }
 
-    for (let i = 0; i < source.length; i++) {
-      if (Array.isArray(source[i])) {
-        const inner = transformArray(source[i], depth + 1);
+    for (let i = 0; i < arr.length; i++) {
+      if (Array.isArray(arr[i])) {
+        const inner = transformArray(arr[i], depth + 1);
         if (inner) {
-          const copy = source.slice();
+          const copy = arr.slice();
           copy[i] = inner;
           return copy;
         }
       }
     }
-    if (source.length !== arr.length) return source;
     return null;
   }
 
   function transformElement(node, depth = 0) {
     if (!isEl(node) || depth > 8) return null;
-    const props = node.props;
-    for (const [key, value] of Object.entries(props)) {
-      if (Array.isArray(value)) {
-        const next = transformArray(value, key === "children" ? 0 : 1);
-        if (next) return React.cloneElement(node, { [key]: next });
-      } else if (isEl(value)) {
-        const next = transformElement(value, depth + 1);
-        if (next) return React.cloneElement(node, { [key]: next });
-      }
+    const children = node.props.children;
+    if (Array.isArray(children)) {
+      const next = transformArray(children, 0);
+      if (next) return React.cloneElement(node, { children: next });
+    } else if (isEl(children)) {
+      const next = transformElement(children, depth + 1);
+      if (next) return React.cloneElement(node, { children: next });
     }
     return null;
   }
