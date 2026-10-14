@@ -111,6 +111,24 @@ var plugin = (() => {
     notify();
   }
 
+  function applyToHttpArgs(args) {
+    if (!Array.isArray(args) || args.length === 0) return;
+    if (args[0] && typeof args[0] === "object") {
+      applyToRequest(args[0]);
+      return;
+    }
+
+    if (typeof args[0] !== "string" || !isSearchUrl(args[0])) return;
+    const request = {
+      url: args[0],
+      body: args[1],
+      query: args[2]
+    };
+    applyToRequest(request);
+    args[1] = request.body;
+    args[2] = request.query;
+  }
+
   // ---------- 2. Add the options to the "Filter results..." menu ----------
   const isEl = (x) => !!x && typeof x === "object" && !Array.isArray(x) && x.props && (x.type !== undefined || x.$$typeof !== undefined);
   const isPlain = (x) => !!x && typeof x === "object" && !Array.isArray(x) && !isEl(x);
@@ -208,18 +226,27 @@ var plugin = (() => {
     return null;
   }
 
+  function transformElement(node, depth = 0) {
+    if (!isEl(node) || depth > 8) return null;
+    const props = node.props;
+    for (const [key, value] of Object.entries(props)) {
+      if (Array.isArray(value)) {
+        const next = transformArray(value, key === "children" ? 0 : 1);
+        if (next) return React.cloneElement(node, { [key]: next });
+      } else if (isEl(value)) {
+        const next = transformElement(value, depth + 1);
+        if (next) return React.cloneElement(node, { [key]: next });
+      }
+    }
+    return null;
+  }
+
   function onRender(result) {
     try {
-      const props = result && result.props;
-      if (!props || typeof props !== "object") return;
-      for (const key of Object.keys(props)) {
-        const v = props[key];
-        if (!Array.isArray(v)) continue;
-        const next = transformArray(v, key === "children" ? 0 : 1);
-        if (next) {
-          notify();
-          return React.cloneElement(result, { [key]: next });
-        }
+      const next = transformElement(result);
+      if (next) {
+        notify();
+        return next;
       }
     } catch (e) {
       console.error("[SearchSort] menu", e?.message);
@@ -253,7 +280,7 @@ var plugin = (() => {
           unpatches.push(
             patcher.before(method, http, (args) => {
               try {
-                applyToRequest(args[0]);
+                applyToHttpArgs(args);
               } catch (e) {
                 console.error("[SearchSort]", e?.message);
               }
