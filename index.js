@@ -31,8 +31,6 @@ var plugin = (() => {
   let menuHits = 0;
   let labelSightings = 0;
   let startNote = "";
-  let lastSearchCall = null;
-  let replayingSearch = false;
   const listeners = new Set();
   const notify = () => listeners.forEach((fn) => fn());
 
@@ -52,23 +50,7 @@ var plugin = (() => {
     try {
       B.plugin?.flushStorage?.();
     } catch {}
-    if (lastSearchCall && !replayingSearch) {
-      replayingSearch = true;
-      try {
-        const result = lastSearchCall();
-        if (result && typeof result.catch === "function") {
-          result.catch((error) => console.error("[SearchSort] refresh", error?.message));
-        }
-        toast(`Search sort: ${currentMode().label}. Refreshing results...`);
-      } catch (e) {
-        console.error("[SearchSort] refresh", e?.message);
-        toast(`Search sort: ${currentMode().label}. Run the search again to apply it.`);
-      } finally {
-        replayingSearch = false;
-      }
-    } else {
-      toast(`Search sort: ${currentMode().label}. Run the search again to apply it.`);
-    }
+    toast(`Search sort: ${currentMode().label}. Run the search again to apply it.`);
     notify();
   }
 
@@ -160,25 +142,6 @@ var plugin = (() => {
     args[2] = request.query;
   }
 
-  function copyRequestArgs(args) {
-    return args.map((value) => {
-      if (!value || typeof value !== "object") return value;
-      try {
-        return JSON.parse(JSON.stringify(value));
-      } catch {
-        return value;
-      }
-
-      function rememberSearchCall(http, method, args) {
-        const saved = copyRequestArgs(args);
-        lastSearchCall = () => {
-          const replayArgs = copyRequestArgs(saved);
-          return Reflect.apply(http[method], http, replayArgs);
-        };
-      }
-    });
-  }
-
   // ---------- 2. Add the options to the "Filter results..." menu ----------
   const isEl = (x) => !!x && typeof x === "object" && !Array.isArray(x) && x.props && (x.type !== undefined || x.$$typeof !== undefined);
   const isPlain = (x) => !!x && typeof x === "object" && !Array.isArray(x) && !isEl(x);
@@ -205,15 +168,16 @@ var plugin = (() => {
 
   const HANDLER_KEY = /(press|select|click|action|handler|callback)/i;
 
-  function rewrite(node, from, to, handler, depth = 0) {
+  function rewriteLabel(node, from, to, depth = 0) {
     if (node == null || depth > 6) return node;
     if (typeof node === "string") return node === from ? to : node;
-    if (Array.isArray(node)) return node.map((n) => rewrite(n, from, to, handler, depth + 1));
+    if (Array.isArray(node)) return node.map((n) => rewriteLabel(n, from, to, depth + 1));
     if (isEl(node)) {
       const next = {};
       for (const [k, v] of Object.entries(node.props)) {
-        if (typeof v === "function" && HANDLER_KEY.test(k)) next[k] = handler;
-        else if (typeof v === "string" || Array.isArray(v) || isEl(v)) next[k] = rewrite(v, from, to, handler, depth + 1);
+        next[k] = typeof v === "string" || Array.isArray(v) || isEl(v)
+          ? rewriteLabel(v, from, to, depth + 1)
+          : v;
       }
       return React.cloneElement(node, next);
     }
@@ -222,9 +186,17 @@ var plugin = (() => {
 
   function makeRow(anchor, found, mode) {
     const label = `${store.mode === mode.key ? "✔ " : ""}Sort: ${mode.label}`;
-    const handler = () => choose(mode.key);
+    const handler = (event) => {
+      event?.stopPropagation?.();
+      choose(mode.key);
+    };
     if (isEl(anchor)) {
-      return React.cloneElement(rewrite(anchor, found.label, label, handler), { key: `searchsort-${mode.key}` });
+      const row = rewriteLabel(anchor, found.label, label);
+      const props = { key: `searchsort-${mode.key}` };
+      for (const key of Object.keys(anchor.props)) {
+        if (typeof anchor.props[key] === "function" && HANDLER_KEY.test(key)) props[key] = handler;
+      }
+      return React.cloneElement(row, props);
     }
     const copy = { ...anchor, __searchsort: true };
     copy[found.field] = label;
@@ -328,11 +300,6 @@ var plugin = (() => {
           unpatches.push(
             patcher.before(method, http, (args) => {
               try {
-                if (!replayingSearch && args[0] && typeof args[0] === "object" && isSearchUrl(args[0].url)) {
-                  rememberSearchCall(http, method, args);
-                } else if (!replayingSearch && typeof args[0] === "string" && isSearchUrl(args[0])) {
-                  rememberSearchCall(http, method, args);
-                }
                 applyToHttpArgs(args);
               } catch (e) {
                 console.error("[SearchSort]", e?.message);
