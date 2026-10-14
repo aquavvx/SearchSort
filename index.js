@@ -10,7 +10,18 @@ var plugin = (() => {
     { key: "default", label: "Most relevant", by: null, order: null }
   ];
 
-  const MENU_ANCHOR = "By author type";
+  const LABELS = [
+    "By author type",
+    "After a date",
+    "Before a date",
+    "Sent on a date",
+    "Mention someone",
+    "Has specific data",
+    "In a specific channel",
+    "From a specific person"
+  ];
+  const PREFERRED = "By author type";
+
   const defaults = { mode: "newest" };
   const store = B.plugin?.createStorage ? B.plugin.createStorage({ ...defaults }) : { ...defaults };
   if (store.mode === undefined) store.mode = defaults.mode;
@@ -18,6 +29,7 @@ var plugin = (() => {
   let unpatches = [];
   let lastSeen = "No search seen yet.";
   let menuHits = 0;
+  let labelSightings = 0;
   let startNote = "";
   const listeners = new Set();
   const notify = () => listeners.forEach((fn) => fn());
@@ -38,8 +50,7 @@ var plugin = (() => {
     try {
       B.plugin?.flushStorage?.();
     } catch {}
-    const m = currentMode();
-    toast(`Search sort: ${m.label}. Run the search again to apply.`);
+    toast(`Search sort: ${currentMode().label}. Edit your search to apply it.`);
     notify();
   }
 
@@ -53,7 +64,6 @@ var plugin = (() => {
     const mode = currentMode();
     const notes = [];
 
-    // New search screen: POST .../messages/search/tabs with the options inside body.tabs
     let body = request.body;
     const wasString = typeof body === "string";
     if (wasString) {
@@ -86,7 +96,6 @@ var plugin = (() => {
       request.body = wasString ? JSON.stringify(body) : body;
     }
 
-    // Older style: GET .../messages/search?query
     if (mode.by && !body) {
       if (request.query == null || typeof request.query === "object") {
         request.query = { ...(request.query || {}), sort_by: mode.by, sort_order: mode.order };
@@ -103,54 +112,115 @@ var plugin = (() => {
   }
 
   // ---------- 2. Add the options to the "Filter results..." menu ----------
-  function textMatches(node, depth = 0) {
-    if (node == null || depth > 4) return false;
-    if (typeof node === "string") return node === MENU_ANCHOR;
-    if (Array.isArray(node)) return node.some((n) => textMatches(n, depth + 1));
-    if (typeof node === "object" && node.props) {
-      return Object.values(node.props).some((v) => textMatches(v, depth + 1));
+  const isEl = (x) => !!x && typeof x === "object" && !Array.isArray(x) && x.props && (x.type !== undefined || x.$$typeof !== undefined);
+  const isPlain = (x) => !!x && typeof x === "object" && !Array.isArray(x) && !isEl(x);
+  const isOurs = (x) => !!x && ((typeof x.key === "string" && x.key.startsWith("searchsort-")) || x.__searchsort === true);
+
+  function labelsIn(node, out = new Set(), depth = 0) {
+    if (node == null || depth > 4) return out;
+    if (typeof node === "string") {
+      if (LABELS.includes(node)) out.add(node);
+    } else if (Array.isArray(node)) {
+      if (node.length <= 30) for (const n of node) labelsIn(n, out, depth + 1);
+    } else if (isEl(node)) {
+      for (const v of Object.values(node.props)) labelsIn(v, out, depth + 1);
     }
-    return false;
+    return out;
   }
 
-  function rewrite(node, label, handler, depth = 0) {
+  function plainLabel(obj) {
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === "string" && LABELS.includes(v)) return { field: k, label: v };
+    }
+    return null;
+  }
+
+  const HANDLER_KEY = /(press|select|click|action|handler|callback)/i;
+
+  function rewrite(node, from, to, handler, depth = 0) {
     if (node == null || depth > 6) return node;
-    if (typeof node === "string") return node === MENU_ANCHOR ? label : node;
-    if (Array.isArray(node)) return node.map((n) => rewrite(n, label, handler, depth + 1));
-    if (typeof node === "object" && node.props) {
+    if (typeof node === "string") return node === from ? to : node;
+    if (Array.isArray(node)) return node.map((n) => rewrite(n, from, to, handler, depth + 1));
+    if (isEl(node)) {
       const next = {};
       for (const [k, v] of Object.entries(node.props)) {
-        if (typeof v === "function" && /^on(Press|Select|Click|Change)/.test(k)) next[k] = handler;
-        else if (k === "children" || typeof v === "string" || (v && typeof v === "object" && !React.isValidElement?.(v) && !Array.isArray(v) ? false : true)) {
-          next[k] = rewrite(v, label, handler, depth + 1);
-        }
+        if (typeof v === "function" && HANDLER_KEY.test(k)) next[k] = handler;
+        else if (typeof v === "string" || Array.isArray(v) || isEl(v)) next[k] = rewrite(v, from, to, handler, depth + 1);
       }
       return React.cloneElement(node, next);
     }
     return node;
   }
 
-  function injectMenu(el) {
-    const kids = el?.props?.children;
-    if (!Array.isArray(kids) || kids.length > 40) return;
-    if (kids.some((k) => typeof k?.key === "string" && k.key.startsWith("searchsort-"))) return;
-    const idx = kids.findIndex((k) => k && typeof k === "object" && k.props && textMatches(k));
-    if (idx < 0) return;
-    const anchor = kids[idx];
-    const extras = MODES.map((m) => {
-      const label = `${store.mode === m.key ? "\u2714 " : ""}Sort: ${m.label}`;
-      const row = rewrite(anchor, label, () => choose(m.key));
-      return React.cloneElement(row, { key: `searchsort-${m.key}` });
+  function makeRow(anchor, found, mode) {
+    const label = `${store.mode === mode.key ? "✔ " : ""}Sort: ${mode.label}`;
+    const handler = () => choose(mode.key);
+    if (isEl(anchor)) {
+      return React.cloneElement(rewrite(anchor, found.label, label, handler), { key: `searchsort-${mode.key}` });
+    }
+    const copy = { ...anchor, __searchsort: true };
+    copy[found.field] = label;
+    for (const [k, v] of Object.entries(copy)) {
+      if (typeof v === "function" && HANDLER_KEY.test(k)) copy[k] = handler;
+    }
+    if (typeof copy.key === "string") copy.key = `searchsort-${mode.key}`;
+    if (typeof copy.id === "string") copy.id = `searchsort-${mode.key}`;
+    return copy;
+  }
+
+  function transformArray(arr, depth) {
+    if (!Array.isArray(arr) || depth > 3 || arr.length > 30 || arr.length === 0) return null;
+    if (arr.some(isOurs)) return null;
+
+    const candidates = [];
+    arr.forEach((item, i) => {
+      if (isEl(item)) {
+        const set = labelsIn(item);
+        if (set.size > 0) labelSightings++;
+        if (set.size === 1) candidates.push({ i, found: { label: [...set][0] } });
+      } else if (isPlain(item)) {
+        const f = plainLabel(item);
+        if (f) {
+          labelSightings++;
+          candidates.push({ i, found: f });
+        }
+      }
     });
-    const next = [...kids.slice(0, idx + 1), ...extras, ...kids.slice(idx + 1)];
-    menuHits++;
-    notify();
-    return React.cloneElement(el, { children: next });
+
+    if (candidates.length) {
+      const pick = candidates.find((c) => c.found.label === PREFERRED) || candidates[candidates.length - 1];
+      const anchor = arr[pick.i];
+      const extras = MODES.map((m) => makeRow(anchor, pick.found, m));
+      menuHits++;
+      return [...arr.slice(0, pick.i + 1), ...extras, ...arr.slice(pick.i + 1)];
+    }
+
+    for (let i = 0; i < arr.length; i++) {
+      if (Array.isArray(arr[i])) {
+        const inner = transformArray(arr[i], depth + 1);
+        if (inner) {
+          const copy = arr.slice();
+          copy[i] = inner;
+          return copy;
+        }
+      }
+    }
+    return null;
   }
 
   function onRender(result) {
     try {
-      if (result && result.props && Array.isArray(result.props.children)) return injectMenu(result);
+      const props = result && result.props;
+      if (!props || typeof props !== "object") return;
+      for (const key of Object.keys(props)) {
+        const v = props[key];
+        if (!Array.isArray(v)) continue;
+        const next = transformArray(v, key === "children" ? 0 : 1);
+        if (next) {
+          notify();
+          return React.cloneElement(result, { [key]: next });
+        }
+      }
     } catch (e) {
       console.error("[SearchSort] menu", e?.message);
     }
@@ -217,6 +287,7 @@ var plugin = (() => {
     listeners.clear();
   }
 
+  // Settings page: status only. Sorting is chosen from the search Filter results menu.
   function Settings() {
     const [, bump] = React.useState(0);
     React.useEffect(() => {
@@ -225,34 +296,16 @@ var plugin = (() => {
       return () => listeners.delete(fn);
     }, []);
 
-    const rows = MODES.map((m) => {
-      const selected = store.mode === m.key;
-      return h(
-        RN.Pressable,
-        {
-          key: m.key,
-          onPress: () => choose(m.key),
-          style: {
-            padding: 14,
-            borderRadius: 10,
-            borderWidth: 1,
-            borderColor: selected ? "#5865F2" : "#4f545c",
-            backgroundColor: selected ? "rgba(88,101,242,0.25)" : "transparent"
-          }
-        },
-        h(RN.Text, { style: { color: "#ffffff", fontSize: 16 } }, (selected ? "\u2714  " : "") + m.label)
-      );
-    });
-
-    const dim = { color: "#b9bbbe", fontSize: 12 };
+    const dim = { color: "#b9bbbe", fontSize: 13 };
     return h(
       RN.ScrollView,
-      { contentContainerStyle: { padding: 16, gap: 12 } },
-      h(RN.Text, { style: { color: "#ffffff", fontSize: 20, fontWeight: "700" } }, "Search sort order"),
-      h(RN.Text, { style: { color: "#b9bbbe" } }, "Also available in the search Filter results menu."),
-      ...rows,
+      { contentContainerStyle: { padding: 16, gap: 10 } },
+      h(RN.Text, { style: { color: "#ffffff", fontSize: 20, fontWeight: "700" } }, "SearchSort"),
+      h(RN.Text, { style: { color: "#b9bbbe" } }, "Choose the sort order from the Filter results menu in search."),
+      h(RN.Text, { style: dim }, `Current: ${currentMode().label}`),
       h(RN.Text, { style: dim }, `Status: ${startNote}`),
-      h(RN.Text, { style: dim }, `Filter menu rows added: ${menuHits} time(s)`),
+      h(RN.Text, { style: dim }, `Menu labels spotted: ${labelSightings}`),
+      h(RN.Text, { style: dim }, `Menu rows added: ${menuHits}`),
       h(RN.Text, { style: dim }, `Last search: ${lastSeen}`)
     );
   }
