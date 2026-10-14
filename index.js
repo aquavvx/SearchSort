@@ -172,6 +172,7 @@ var plugin = (() => {
   const isEl = (x) => !!x && typeof x === "object" && !Array.isArray(x) && x.props && (x.type !== undefined || x.$$typeof !== undefined);
   const isPlain = (x) => !!x && typeof x === "object" && !Array.isArray(x) && !isEl(x);
   const isOurs = (x) => !!x && ((typeof x.key === "string" && x.key.startsWith("searchsort-")) || x.__searchsort === true);
+  const isSortLabel = (value) => typeof value === "string" && /^\s*(?:✔\s*)?Sort:\s(?:Newest first|Oldest first|Most relevant)\s*$/.test(value);
 
   function containsOurs(node, depth = 0) {
     if (node == null || depth > 8) return false;
@@ -180,6 +181,15 @@ var plugin = (() => {
     if (isEl(node)) {
       return Object.values(node.props).some((value) => containsOurs(value, depth + 1));
     }
+    return false;
+  }
+
+  function containsSortLabel(node, depth = 0) {
+    if (node == null || depth > 8) return false;
+    if (isSortLabel(node)) return true;
+    if (Array.isArray(node)) return node.some((item) => containsSortLabel(item, depth + 1));
+    if (isEl(node)) return Object.values(node.props).some((value) => containsSortLabel(value, depth + 1));
+    if (isPlain(node)) return Object.values(node).some((value) => containsSortLabel(value, depth + 1));
     return false;
   }
 
@@ -237,10 +247,11 @@ var plugin = (() => {
 
   function transformArray(arr, depth) {
     if (!Array.isArray(arr) || depth > 3 || arr.length > 30 || arr.length === 0) return null;
-    if (containsOurs(arr)) return null;
+    const clean = arr.filter((item) => !containsOurs(item) && !containsSortLabel(item));
+    const source = clean.length === arr.length ? arr : clean;
 
     const candidates = [];
-    arr.forEach((item, i) => {
+    source.forEach((item, i) => {
       if (isEl(item)) {
         const set = labelsIn(item);
         if (set.size > 0) labelSightings++;
@@ -262,16 +273,17 @@ var plugin = (() => {
       return [...arr.slice(0, pick.i + 1), ...extras, ...arr.slice(pick.i + 1)];
     }
 
-    for (let i = 0; i < arr.length; i++) {
-      if (Array.isArray(arr[i])) {
-        const inner = transformArray(arr[i], depth + 1);
+    for (let i = 0; i < source.length; i++) {
+      if (Array.isArray(source[i])) {
+        const inner = transformArray(source[i], depth + 1);
         if (inner) {
-          const copy = arr.slice();
+          const copy = source.slice();
           copy[i] = inner;
           return copy;
         }
       }
     }
+    if (source.length !== arr.length) return source;
     return null;
   }
 
