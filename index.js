@@ -55,8 +55,11 @@ var plugin = (() => {
     if (lastSearchCall && !replayingSearch) {
       replayingSearch = true;
       try {
-        lastSearchCall();
-        toast(`Search sort: ${currentMode().label}. Results refreshed.`);
+        const result = lastSearchCall();
+        if (result && typeof result.catch === "function") {
+          result.catch((error) => console.error("[SearchSort] refresh", error?.message));
+        }
+        toast(`Search sort: ${currentMode().label}. Refreshing results...`);
       } catch (e) {
         console.error("[SearchSort] refresh", e?.message);
         toast(`Search sort: ${currentMode().label}. Run the search again to apply it.`);
@@ -164,6 +167,14 @@ var plugin = (() => {
         return JSON.parse(JSON.stringify(value));
       } catch {
         return value;
+      }
+
+      function rememberSearchCall(http, method, args) {
+        const saved = copyRequestArgs(args);
+        lastSearchCall = () => {
+          const replayArgs = copyRequestArgs(saved);
+          return Reflect.apply(http[method], http, replayArgs);
+        };
       }
     });
   }
@@ -318,11 +329,9 @@ var plugin = (() => {
             patcher.before(method, http, (args) => {
               try {
                 if (!replayingSearch && args[0] && typeof args[0] === "object" && isSearchUrl(args[0].url)) {
-                  const saved = copyRequestArgs(args);
-                  lastSearchCall = () => http[method](...saved);
+                  rememberSearchCall(http, method, args);
                 } else if (!replayingSearch && typeof args[0] === "string" && isSearchUrl(args[0])) {
-                  const saved = copyRequestArgs(args);
-                  lastSearchCall = () => http[method](...saved);
+                  rememberSearchCall(http, method, args);
                 }
                 applyToHttpArgs(args);
               } catch (e) {
