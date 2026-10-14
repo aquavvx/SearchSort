@@ -3,7 +3,7 @@
 Snow/Bunny plugin for Discord mobile message search. Open Discord search, choose
 **Filter results**, and use the injected **Sort: Newest first**, **Sort: Oldest
 first**, or **Sort: Most relevant** option. The selected option is applied to
-the next edited search.
+the current search immediately when possible; otherwise run the search again.
 
 Install from the repository's raw manifest:
 

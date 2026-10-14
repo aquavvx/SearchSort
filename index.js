@@ -31,6 +31,8 @@ var plugin = (() => {
   let menuHits = 0;
   let labelSightings = 0;
   let startNote = "";
+  let lastSearchCall = null;
+  let replayingSearch = false;
   const listeners = new Set();
   const notify = () => listeners.forEach((fn) => fn());
 
@@ -50,7 +52,20 @@ var plugin = (() => {
     try {
       B.plugin?.flushStorage?.();
     } catch {}
-    toast(`Search sort: ${currentMode().label}. Edit your search to apply it.`);
+    if (lastSearchCall && !replayingSearch) {
+      replayingSearch = true;
+      try {
+        lastSearchCall();
+        toast(`Search sort: ${currentMode().label}. Results refreshed.`);
+      } catch (e) {
+        console.error("[SearchSort] refresh", e?.message);
+        toast(`Search sort: ${currentMode().label}. Run the search again to apply it.`);
+      } finally {
+        replayingSearch = false;
+      }
+    } else {
+      toast(`Search sort: ${currentMode().label}. Run the search again to apply it.`);
+    }
     notify();
   }
 
@@ -78,11 +93,14 @@ var plugin = (() => {
         const keys = Object.keys(body.tabs);
         notes.push(`tabs: ${keys.join(",")}`);
         const target = body.tabs.messages && typeof body.tabs.messages === "object" ? ["messages"] : keys;
-        if (mode.by) {
-          for (const k of target) {
-            if (body.tabs[k] && typeof body.tabs[k] === "object") {
+        for (const k of target) {
+          if (body.tabs[k] && typeof body.tabs[k] === "object") {
+            if (mode.by) {
               body.tabs[k].sort_by = mode.by;
               body.tabs[k].sort_order = mode.order;
+            } else {
+              delete body.tabs[k].sort_by;
+              delete body.tabs[k].sort_order;
             }
           }
         }
@@ -91,18 +109,28 @@ var plugin = (() => {
         if (mode.by) {
           body.sort_by = mode.by;
           body.sort_order = mode.order;
+        } else {
+          delete body.sort_by;
+          delete body.sort_order;
         }
       }
       request.body = wasString ? JSON.stringify(body) : body;
     }
 
-    if (mode.by && !body) {
+    if (!body) {
       if (request.query == null || typeof request.query === "object") {
-        request.query = { ...(request.query || {}), sort_by: mode.by, sort_order: mode.order };
+        request.query = { ...(request.query || {}) };
+        if (mode.by) {
+          request.query.sort_by = mode.by;
+          request.query.sort_order = mode.order;
+        } else {
+          delete request.query.sort_by;
+          delete request.query.sort_order;
+        }
         notes.push("query object");
       } else if (typeof request.query === "string") {
         const clean = request.query.replace(/(^|&)sort_(by|order)=[^&]*/g, "").replace(/^&/, "");
-        request.query = `${clean}${clean ? "&" : ""}sort_by=${mode.by}&sort_order=${mode.order}`;
+        request.query = mode.by ? `${clean}${clean ? "&" : ""}sort_by=${mode.by}&sort_order=${mode.order}` : clean;
         notes.push("query string");
       }
     }
@@ -129,10 +157,31 @@ var plugin = (() => {
     args[2] = request.query;
   }
 
+  function copyRequestArgs(args) {
+    return args.map((value) => {
+      if (!value || typeof value !== "object") return value;
+      try {
+        return JSON.parse(JSON.stringify(value));
+      } catch {
+        return value;
+      }
+    });
+  }
+
   // ---------- 2. Add the options to the "Filter results..." menu ----------
   const isEl = (x) => !!x && typeof x === "object" && !Array.isArray(x) && x.props && (x.type !== undefined || x.$$typeof !== undefined);
   const isPlain = (x) => !!x && typeof x === "object" && !Array.isArray(x) && !isEl(x);
   const isOurs = (x) => !!x && ((typeof x.key === "string" && x.key.startsWith("searchsort-")) || x.__searchsort === true);
+
+  function containsOurs(node, depth = 0) {
+    if (node == null || depth > 8) return false;
+    if (isOurs(node)) return true;
+    if (Array.isArray(node)) return node.some((item) => containsOurs(item, depth + 1));
+    if (isEl(node)) {
+      return Object.values(node.props).some((value) => containsOurs(value, depth + 1));
+    }
+    return false;
+  }
 
   function labelsIn(node, out = new Set(), depth = 0) {
     if (node == null || depth > 4) return out;
@@ -188,7 +237,7 @@ var plugin = (() => {
 
   function transformArray(arr, depth) {
     if (!Array.isArray(arr) || depth > 3 || arr.length > 30 || arr.length === 0) return null;
-    if (arr.some(isOurs)) return null;
+    if (containsOurs(arr)) return null;
 
     const candidates = [];
     arr.forEach((item, i) => {
@@ -280,6 +329,13 @@ var plugin = (() => {
           unpatches.push(
             patcher.before(method, http, (args) => {
               try {
+                if (!replayingSearch && args[0] && typeof args[0] === "object" && isSearchUrl(args[0].url)) {
+                  const saved = copyRequestArgs(args);
+                  lastSearchCall = () => http[method](...saved);
+                } else if (!replayingSearch && typeof args[0] === "string" && isSearchUrl(args[0])) {
+                  const saved = copyRequestArgs(args);
+                  lastSearchCall = () => http[method](...saved);
+                }
                 applyToHttpArgs(args);
               } catch (e) {
                 console.error("[SearchSort]", e?.message);
